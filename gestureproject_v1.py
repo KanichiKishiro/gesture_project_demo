@@ -55,6 +55,7 @@ is_pointing       = False     # 現在指さし誘導中か
 point_hold_cnt    = 0         # 指さし姿勢の連続検出カウント
 point_release_cnt = 0         # 指さし姿勢の連続消失カウント
 point_side        = None      # 'L' or 'R' どちらの手で指しているか
+point_lateral_view = 0.0   # UI表示用：直近の指さし左右量（追加）
 
 
 # =========================
@@ -232,6 +233,7 @@ def handle_action(results, depth_img, w, h):
     global is_following, lost_frames, last_cmdVL, last_cmdVR
     global invalid_depth_frames
     global is_pointing, point_hold_cnt, point_release_cnt, point_side
+    global point_lateral_view 
 
     def with_src(text, src):
         return f"{text}[{src}]"
@@ -354,6 +356,7 @@ def handle_action(results, depth_img, w, h):
         if point_release_cnt >= POINT_RELEASE_FRAMES:
             point_hold_cnt = 0
             if is_pointing:
+                point_lateral_view = point_lateral
                 # 指さしを下ろした → 即停止（安全要件）
                 is_pointing = False
                 last_cmdVL, last_cmdVR = 0, 0
@@ -366,13 +369,14 @@ def handle_action(results, depth_img, w, h):
     # ===== 指さし誘導中 =====
     if is_pointing:
         # 第1段階：指先の画像左右オフセットを lateral に使う
+        point_lateral_view = point_lateral          # ← この行を追加
         cmdVL, cmdVR = steer_from_lateral(point_lateral, POINT_BASE_SPEED)
         last_cmdVL, last_cmdVR = cmdVL, cmdVR
         side_txt = "R" if point_side == "R" else "L"
         return cmdVL, cmdVR, with_src(f"POINTING({side_txt})", depth_src), distance
 
     # ===== 跟随开始（坑B修复：不 return 0，直接进入当帧跟随控制）=====
-    if follow_start:
+    if follow_start:    
         is_following = True
 
     # ===== 只有跟随时才允许停止（避免干扰倒车）=====
@@ -557,6 +561,30 @@ with mp_holistic.Holistic(
                     (30, y0 + 7*dy), cv2.FONT_HERSHEY_SIMPLEX, 0.75, yellow, 2)
         cv2.putText(vis, f"ShC  : ({sh_coords[0]:.3f},{sh_coords[1]:.3f})",
                     (30, y0 + 8*dy), cv2.FONT_HERSHEY_SIMPLEX, 0.75, yellow, 2)
+        
+        # ===== 指さし可視化（追加）=====
+        # 画面中央の基準線とデッドバンド帯
+        cx = 320  # 640幅の中央
+        db_px = int(POINT_LR_DEADBAND * 640)
+        cv2.line(vis, (cx, 0), (cx, 480), (200, 200, 200), 1)
+        cv2.line(vis, (cx - db_px, 0), (cx - db_px, 480), (120, 120, 120), 1)
+        cv2.line(vis, (cx + db_px, 0), (cx + db_px, 480), (120, 120, 120), 1)
+
+        # 指先マーカー（指さし中のみ、対応する手の人差し指TIPに円）
+        if is_pointing and results.pose_landmarks:
+            hand = (results.right_hand_landmarks if point_side == "R"
+                    else results.left_hand_landmarks)
+            if hand is not None:
+                tip = hand.landmark[mp_holistic.HandLandmark.INDEX_FINGER_TIP]
+                tx = int(tip.x * 640)
+                ty = int(tip.y * 480)
+                cv2.circle(vis, (tx, ty), 12, (0, 0, 255), 2)
+                cv2.circle(vis, (tx, ty), 3, (0, 0, 255), -1)
+
+        # lateral 数値（右上あたり）
+        cv2.putText(vis, f"Point LR: {point_lateral_view:+.3f}",
+                    (340, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
 
         msg = String()
         msg.data = json.dumps({
